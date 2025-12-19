@@ -19,14 +19,11 @@ services:
   - type: static
     name: hospital-frontend
     env: static
-    buildCommand: "cd frontend && npm install && npm run build"
-    publishDir: "frontend/dist"
+    buildCommand: "cd frontEnd && npm install && npm run build"
+    publishDir: "frontEnd/dist"
     envVars:
       - key: VITE_API_BASE_URL
-        fromService:
-          type: web
-          name: hospital-backend
-          property: host
+        value: "https://hospital-backend.onrender.com/api"
     routes:
       - type: rewrite
         source: "/*"
