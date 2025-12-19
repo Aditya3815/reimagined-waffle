@@ -23,7 +23,13 @@ It is intended to help developers, architects, and stakeholders quickly understa
 The architecture diagram is available via Eraser.io:
 
 🔗 **Eraser Workspace**  
+
+🔗 **Tech Stach Diagram** 
 https://app.eraser.io/workspace/TChmuZnM660NF097Yl4w
+
+
+🔗 **Database Diagram**   
+https://app.eraser.io/workspace/CcRuKJQJvBN1Jgf3gE4k
 
 > The diagram should be treated as the **single source of truth** for system design.
 
