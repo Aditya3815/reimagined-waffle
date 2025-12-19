@@ -1,0 +1,35 @@
+# Git ignore file for React + Django project
+
+# Node.js
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env
+db.sqlite3
+
+# Firebase / GCP Secrets
+serviceAccountKey.json
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Other
+temp_project/
+backend/abc
+backend/hell.sj

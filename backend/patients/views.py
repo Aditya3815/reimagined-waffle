@@ -1,0 +1,401 @@
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.permissions import AllowAny
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+from firebase_admin import firestore
+from backend.firebase_init import db
+from datetime import datetime
+import uuid
+from .serializers import (
+    PatientRegistrationSerializer,
+    PatientLoginSerializer,
+    PatientProfileSerializer,
+    BookAppointmentSerializer
+)
+from doctors.auth import hash_password, verify_password, generate_jwt_token, JWTAuthentication
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class PatientRegistrationView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = PatientRegistrationSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        email = data['email']
+        password = data.pop('password')
+        data.pop('password_confirm')
+
+        try:
+            patients_ref = db.collection('patients')
+            existing = patients_ref.where('email', '==', email).limit(1).stream()
+            if any(existing):
+                return Response({'error': 'Email already exists'}, status=status.HTTP_400_BAD_REQUEST)
+
+            uid = str(uuid.uuid4())
+            hashed_password = hash_password(password)
+
+            patient_data = {
+                'uid': uid,
+                'email': email,
+                'password': hashed_password,
+                'first_name': data['first_name'],
+                'last_name': data['last_name'],
+                'phone_number': data.get('phone_number', ''),
+                'date_of_birth': str(data.get('date_of_birth', '')),
+                'address': data.get('address', ''),
+                'emergency_contact': data.get('emergency_contact', ''),
+                'profile_picture': '',
+                'created_at': firestore.SERVER_TIMESTAMP,
+                'updated_at': firestore.SERVER_TIMESTAMP
+            }
+
+            db.collection('patients').document(uid).set(patient_data)
+            tokens = generate_jwt_token(uid, email)
+
+            response_data = {
+                'uid': uid,
+                'email': email,
+                'first_name': data['first_name'],
+                'last_name': data['last_name'],
+                'phone_number': data.get('phone_number', ''),
+                'date_of_birth': str(data.get('date_of_birth', '')),
+                'address': data.get('address', ''),
+                'emergency_contact': data.get('emergency_contact', ''),
+                'profile_picture': '',
+                'created_at': datetime.now().isoformat(),
+                'updated_at': datetime.now().isoformat()
+            }
+
+            return Response({
+                'message': 'Patient registered successfully',
+                'patient': response_data,
+                'tokens': tokens
+            }, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class PatientLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = PatientLoginSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email']
+        password = serializer.validated_data['password']
+        
+        try:
+            patients_ref = db.collection('patients')
+            docs = patients_ref.where('email', '==', email).limit(1).stream()
+            
+            patient_doc = None
+            for doc in docs:
+                patient_doc = doc
+                break
+            
+            if not patient_doc:
+                return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
+            
+            patient_data = patient_doc.to_dict()
+            
+            if not verify_password(password, patient_data['password']):
+                return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
+            
+            tokens = generate_jwt_token(patient_data['uid'], email)
+            patient_data.pop('password')
+            
+            return Response({
+                'message': 'Login successful',
+                'patient': patient_data,
+                'tokens': tokens
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class TokenRefreshView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        refresh_token = request.data.get('refresh_token')
+        
+        if not refresh_token:
+            return Response({'error': 'Refresh token is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            from doctors.auth import decode_jwt_token
+            payload = decode_jwt_token(refresh_token)
+            
+            if payload.get('type') != 'refresh':
+                return Response({'error': 'Invalid token type'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            tokens = generate_jwt_token(payload['uid'], payload['email'])
+            
+            return Response({
+                'message': 'Token refreshed successfully',
+                'tokens': tokens
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class PatientProfileView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = [JWTAuthentication]
+
+    def get(self, request, uid):
+        try:
+            patient_ref = db.collection('patients').document(uid)
+            patient_doc = patient_ref.get()
+            
+            if not patient_doc.exists:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+            
+            patient_data = patient_doc.to_dict()
+            patient_data.pop('password', None)
+            
+            return Response(patient_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def put(self, request, uid):
+        serializer = PatientProfileSerializer(data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            patient_ref = db.collection('patients').document(uid)
+            patient_doc = patient_ref.get()
+            
+            if not patient_doc.exists:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+            
+            update_data = {k: v for k, v in serializer.validated_data.items() 
+                          if k not in ['uid', 'email', 'created_at', 'password']}
+            update_data['updated_at'] = firestore.SERVER_TIMESTAMP
+            
+            patient_ref.update(update_data)
+            
+            updated_doc = patient_ref.get()
+            updated_data = updated_doc.to_dict()
+            updated_data.pop('password', None)
+            
+            return Response({
+                'message': 'Profile updated successfully',
+                'patient': updated_data
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class PatientBookAppointmentView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request, doctor_uid):
+        serializer = BookAppointmentSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        patient_uid = request.data.get('patient_uid')
+        
+        if not patient_uid:
+            return Response({'error': 'patient_uid is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            patient_ref = db.collection('patients').document(patient_uid)
+            patient_doc = patient_ref.get()
+            
+            if not patient_doc.exists:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+            
+            patient_data = patient_doc.to_dict()
+            
+            doctor_ref = db.collection('doctors').document(doctor_uid)
+            doctor_doc = doctor_ref.get()
+            
+            if not doctor_doc.exists:
+                return Response({'error': 'Doctor not found'}, status=status.HTTP_404_NOT_FOUND)
+            
+            doctor_data = doctor_doc.to_dict()
+            
+            if not doctor_data.get('is_active', True):
+                return Response({
+                    'error': 'Doctor is currently offline and not accepting appointments'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            availability = doctor_data.get('availability', [])
+            
+            day_index = None
+            for i, day_avail in enumerate(availability):
+                if day_avail['day'] == data['day']:
+                    day_index = i
+                    break
+            
+            if day_index is None:
+                return Response({
+                    'error': f'Doctor has no availability set for {data["day"]}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            time_slots = availability[day_index].get('time_slots', [])
+            slot_index = None
+            
+            for i, slot in enumerate(time_slots):
+                if slot['start_time'] == data['start_time'] and slot['end_time'] == data['end_time']:
+                    slot_index = i
+                    break
+            
+            if slot_index is None:
+                return Response({'error': 'Requested time slot not found'}, status=status.HTTP_404_NOT_FOUND)
+            
+            if not time_slots[slot_index].get('is_available', True):
+                return Response({'error': 'This time slot is already booked'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            booking_id = str(uuid.uuid4())
+            
+            availability[day_index]['time_slots'][slot_index]['is_available'] = False
+            availability[day_index]['time_slots'][slot_index]['booked_by'] = patient_data['email']
+            availability[day_index]['time_slots'][slot_index]['booking_id'] = booking_id
+            
+            doctor_ref.update({
+                'availability': availability,
+                'updated_at': firestore.SERVER_TIMESTAMP
+            })
+            
+            appointment_data = {
+                'booking_id': booking_id,
+                'doctor_uid': doctor_uid,
+                'doctor_name': f"{doctor_data['first_name']} {doctor_data['last_name']}",
+                'doctor_specialization': doctor_data.get('specialization', ''),
+                'patient_uid': patient_uid,
+                'patient_name': f"{patient_data['first_name']} {patient_data['last_name']}",
+                'patient_email': patient_data['email'],
+                'patient_phone': patient_data.get('phone_number', ''),
+                'day': data['day'],
+                'start_time': data['start_time'],
+                'end_time': data['end_time'],
+                'reason': data.get('reason', ''),
+                'status': 'confirmed',
+                'created_at': firestore.SERVER_TIMESTAMP
+            }
+            
+            db.collection('appointments').document(booking_id).set(appointment_data)
+            
+            return Response({
+                'message': 'Appointment booked successfully',
+                'booking_id': booking_id,
+                'appointment': {
+                    'booking_id': booking_id,
+                    'doctor_name': appointment_data['doctor_name'],
+                    'doctor_specialization': appointment_data['doctor_specialization'],
+                    'patient_name': appointment_data['patient_name'],
+                    'day': data['day'],
+                    'start_time': data['start_time'],
+                    'end_time': data['end_time'],
+                    'status': 'confirmed'
+                }
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class PatientAppointmentsView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, patient_uid):
+        try:
+            appointments_ref = db.collection('appointments')
+            docs = appointments_ref.where('patient_uid', '==', patient_uid).stream()
+            
+            appointments = []
+            for doc in docs:
+                appointment_data = doc.to_dict()
+                appointments.append(appointment_data)
+            
+            return Response({
+                'count': len(appointments),
+                'appointments': appointments
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class PatientCancelAppointmentView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request, booking_id):
+        patient_uid = request.data.get('patient_uid')
+        
+        if not patient_uid:
+            return Response({'error': 'patient_uid is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            appointment_ref = db.collection('appointments').document(booking_id)
+            appointment_doc = appointment_ref.get()
+            
+            if not appointment_doc.exists:
+                return Response({'error': 'Appointment not found'}, status=status.HTTP_404_NOT_FOUND)
+            
+            appointment_data = appointment_doc.to_dict()
+            
+            if appointment_data.get('patient_uid') != patient_uid:
+                return Response({
+                    'error': 'Unauthorized to cancel this appointment'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
+            doctor_ref = db.collection('doctors').document(appointment_data['doctor_uid'])
+            doctor_doc = doctor_ref.get()
+            
+            if doctor_doc.exists:
+                doctor_data = doctor_doc.to_dict()
+                availability = doctor_data.get('availability', [])
+                
+                for day_avail in availability:
+                    if day_avail['day'] == appointment_data['day']:
+                        for slot in day_avail.get('time_slots', []):
+                            if (slot.get('booking_id') == booking_id and
+                                slot['start_time'] == appointment_data['start_time'] and
+                                slot['end_time'] == appointment_data['end_time']):
+                                slot['is_available'] = True
+                                slot.pop('booked_by', None)
+                                slot.pop('booking_id', None)
+                                break
+                
+                doctor_ref.update({
+                    'availability': availability,
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
+            
+            appointment_ref.update({
+                'status': 'cancelled',
+                'cancelled_at': firestore.SERVER_TIMESTAMP
+            })
+            
+            return Response({
+                'message': 'Appointment cancelled successfully',
+                'booking_id': booking_id
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
